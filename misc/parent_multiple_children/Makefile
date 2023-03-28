@@ -11,7 +11,7 @@ child: child.c
 	cc $(CFLAGS) -o $@ $<
 
 run: parent child
-	./parent --deadline 1 --min 7 --max 8 -n 2
+	./parent --deadline 2.5 --min 1 --max 4  -n 4
 
 clean:
 	rm parent child

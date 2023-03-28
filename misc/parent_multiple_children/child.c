@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +15,25 @@ typedef struct _command_line_args_t {
 
 command_line_args_t read_args(int argc, char* argv[]);
 
+void err_exit(char* msg) {
+    perror(msg);
+    exit(1);
+}
+
+volatile sig_atomic_t deadline_reached = 0;
+void sig_handler(int signum) {
+    if (signum == SIGUSR1) deadline_reached = 1;
+}
 int main(int argc, char* argv[]) {
+    int ret = 0;
+
+    // set up signal handler
+    struct sigaction on_sigusr1; // from parent
+    on_sigusr1.sa_handler = sig_handler;
+    ret                   = sigaction(SIGUSR1, &on_sigusr1, NULL);
+    if (ret == -1) err_exit("err: sigaction");
+
+    // read CLI args
     command_line_args_t args = read_args(argc, argv);
 
     // sleep
@@ -23,15 +42,14 @@ int main(int argc, char* argv[]) {
         .tv_nsec = args.nanoseconds_for_sleep,
     };
     struct timespec remaining = {0};
-    int ret                   = nanosleep(&duration, &remaining);
+    if (deadline_reached == 1) return 1;
+    ret = nanosleep(&duration, &remaining);
     if (ret != 0) { // 0 is success
         // efault: req or rem is an invalid pointer
         // einval: one of the fields in req is invalid
         // eintr: interrupted by signal
-        if (errno != EINTR) {
-            perror("err: nanosleep");
-            return 1;
-        }
+        if (errno != EINTR) perror("err: nanosleep");
+        return 1;
     }
     return 0;
 }
