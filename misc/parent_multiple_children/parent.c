@@ -11,6 +11,9 @@ void err_exit(char* msg) {
     perror(msg);
     exit(1);
 }
+int gen_rand_range(int min, int max_inclusive) {
+    return (rand() % (max_inclusive - min + 1)) + min;
+}
 
 double to_sec(struct timespec* dur) {
     double s = (double)dur->tv_nsec / (double)1e9;
@@ -29,7 +32,7 @@ typedef struct _child_t {
     pid_t pid;
     struct timespec start;
     struct timespec stop;
-    int duration_for_sleep;
+    struct timespec duration_for_sleep;
     int status;
 } child_t;
 
@@ -41,18 +44,22 @@ int main(int argc, char* argv[]) {
 
     // fork children
     for (size_t i = 0; i < (size_t)args.num_children; ++i) {
-        int duration_for_sleep =
-            (rand() % (args.max_time - args.min_time + 1)) + args.min_time;
-        int res = fork();
+        // sleep params
+        int seconds     = gen_rand_range(args.min_time, args.max_time - 1);
+        int nanoseconds = gen_rand_range(0, 999999999);
+        int res         = fork();
         switch (res) {
         case -1:
             perror("err: on fork");
             exit(1);
             break;
         case 0:; // at child
-            char num_as_str[12] = {0};
-            sprintf(num_as_str, "%d", duration_for_sleep);
-            char* args[] = {"./child", "-t", num_as_str, NULL};
+            char seconds_as_str[12]     = {0};
+            char nanoseconds_as_str[12] = {0};
+            sprintf(seconds_as_str, "%d", seconds);
+            sprintf(nanoseconds_as_str, "%d", nanoseconds);
+            char* args[] = {"./child",          "-s", seconds_as_str, "--ns",
+                            nanoseconds_as_str, NULL};
             char* env[]  = {NULL};
             int ret      = execve(args[0], args, env); // env empty
             if (ret == -1) {
@@ -61,9 +68,10 @@ int main(int argc, char* argv[]) {
             }
             return 0; // shouldn't reach here
         default:;     // at parent
-            child_t* c            = children + i;
-            c->pid                = res;
-            c->duration_for_sleep = duration_for_sleep;
+            child_t* c                    = children + i;
+            c->pid                        = res;
+            c->duration_for_sleep.tv_sec  = seconds;
+            c->duration_for_sleep.tv_nsec = nanoseconds;
 
             // record start time
             ret = clock_gettime(CLOCK_REALTIME, &(c->start));
@@ -106,8 +114,8 @@ int main(int argc, char* argv[]) {
     for (size_t i = 0; i < (size_t)args.num_children; ++i) {
         child_t* c       = &children[i];
         double slept_for = to_sec(&(c->stop)) - to_sec(&(c->start));
-        printf("child [%5d] slept for %.2f/%d", c->pid, slept_for,
-               c->duration_for_sleep);
+        printf("child [%5d] slept for %.4f/%.4f", c->pid, slept_for,
+               to_sec(&(c->duration_for_sleep)));
         if (WIFEXITED(c->status)) {
             printf(", normal termination with exit status: %d",
                    WEXITSTATUS(c->status));
