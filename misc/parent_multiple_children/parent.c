@@ -1,8 +1,10 @@
 #include <assert.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -24,12 +26,19 @@ typedef struct _command_line_args_t {
     int num_children;
     int min_time;
     int max_time;
+    struct timeval deadline;
 } command_line_args_t;
 
 command_line_args_t read_args(int argc, char* argv[]);
 
+volatile sig_atomic_t deadline_reached = 0;
+void alarm_handler(int signum) {
+    if (signum == SIGALRM) deadline_reached = 1;
+}
+
 typedef struct _child_t {
     pid_t pid;
+    bool reaped;
     struct timespec start;
     struct timespec stop;
     struct timespec duration_for_sleep;
@@ -37,7 +46,8 @@ typedef struct _child_t {
 } child_t;
 
 int main(int argc, char* argv[]) {
-    srand(42); // TODO use current timestamp
+    srand(time(0)); // TODO use current timestamp
+    int ret = 0;
 
     command_line_args_t args = read_args(argc, argv);
     child_t* children        = calloc(sizeof(child_t), args.num_children);
@@ -79,7 +89,21 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // set deadline
+    // set alarm for deadline
+    struct sigaction on_alarm;
+    on_alarm.sa_handler = alarm_handler;
+    ret                 = sigaction(SIGALRM, &on_alarm, NULL);
+    if (ret == -1) err_exit("err: sigaction");
+    /* signal(SIGALRM, alarm_handler); */
+    struct itimerval dur    = {0};
+    dur.it_value            = args.deadline;
+    dur.it_interval.tv_sec  = 0; // do not rearm
+    dur.it_interval.tv_usec = 0; // do not rearm
+    ret                     = setitimer(ITIMER_REAL, &dur, NULL);
+    if (ret == -1) {
+        perror("err: setitimer");
+        exit(1);
+    }
 
     // wait for children
     int reaped = 0;
@@ -87,8 +111,20 @@ int main(int argc, char* argv[]) {
         int status;
         pid_t pid = wait(&status);
         if (pid == -1) {
-            perror("err: on wait"); // ECHILD, EINTR
-            exit(1);
+            if (errno == EINTR && deadline_reached != 0) {
+                for (size_t i = 0; i < (size_t)args.num_children; ++i)
+                    // Ignore ESRCH just in case in between the deadline
+                    // arriving and the parent sending the SIGUSR1 signal, a
+                    // child had already exited hence is now in a zombie state
+                    if (children[i].reaped != true) {
+                        ret = kill(children[i].pid, SIGUSR1);
+                        if (ret == -1 && errno != ESRCH) err_exit("err: kill");
+                    }
+                continue;
+            } else {
+                perror("err: on wait"); // ECHILD, EINTR (deadline == 0)
+                exit(1);
+            }
         }
         child_t* child = NULL;
         for (size_t i = 0; i < (size_t)args.num_children; ++i)
@@ -101,6 +137,7 @@ int main(int argc, char* argv[]) {
             int ret = clock_gettime(CLOCK_REALTIME, &(child->stop));
             if (ret == -1) err_exit("err: clock_gettime");
             child->status = status;
+            child->reaped = true;
         } else {
             // should not be possible unless parent sired a child they did not
             // know about
@@ -121,7 +158,9 @@ int main(int argc, char* argv[]) {
                    WEXITSTATUS(c->status));
         }
         if (WIFSIGNALED(c->status)) {
-            printf(", killed by signal: %d %s", WTERMSIG(c->status),
+            const char* signal = strsignal(WTERMSIG(c->status));
+            assert(signal != NULL);
+            printf(", killed by signal: '%s' %s", signal,
                    WCOREDUMP(c->status) ? "(dumped core)" : "");
         }
         printf("\n");
@@ -153,6 +192,17 @@ command_line_args_t read_args(int argc, char* argv[]) {
         if (strcmp(arg, "-n") == 0) {
             if (i + 1 < argc) {
                 args.num_children = atoi(argv[i + 1]);
+                i += 2;
+                continue;
+            }
+        } else if (strcmp(arg, "-d") == 0 || strcmp(arg, "--deadline") == 0) {
+            if (i + 1 < argc) {
+                double d;
+                sscanf(argv[i + 1], "%lf", &d);
+                long seconds      = (long)d;
+                long microseconds = (d - seconds) * 1000000;
+                args.deadline     = (struct timeval){.tv_sec  = seconds,
+                                                 .tv_usec = microseconds};
                 i += 2;
                 continue;
             }
